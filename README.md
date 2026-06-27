@@ -61,7 +61,7 @@ flatpak install soundblaster-g6x-2.0.0.flatpak
 
 ```bash
 # System dependencies
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libhidapi-dev
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libhidapi-dev libxdo-dev
 
 # Rust toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
