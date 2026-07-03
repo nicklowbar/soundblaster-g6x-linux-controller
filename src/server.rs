@@ -107,6 +107,7 @@ pub async fn start_server(registry: DeviceRegistry) {
     let app = Router::new()
         // Device management
         .route("/api/devices", get(api::get_devices))
+        .route("/api/devices/:id", get(api::get_device))
         .route("/api/devices/:id/status", get(api::get_device_status))
         .route("/api/devices/:id/feature", post(api::set_device_feature))
         // Legacy single-device endpoints (operate on first device)

@@ -329,6 +329,66 @@ pub async fn get_devices(
     Json(devices)
 }
 
+/// GET /api/devices/:id — get device info and available operations
+#[derive(Serialize)]
+pub struct DeviceInfoResponse {
+    pub device: DeviceDescriptor,
+    pub operations: Vec<Operation>,
+}
+
+#[derive(Serialize)]
+pub struct Operation {
+    pub method: String,
+    pub path: String,
+    pub description: String,
+}
+
+pub async fn get_device(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<usize>,
+) -> Response {
+    let mut registry = state.registry.lock().await;
+
+    let device = match registry.device_mut(id) {
+        Some(d) => d,
+        None => {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Device not found", "id": id}))).into_response();
+        }
+    };
+
+    let device_desc = DeviceDescriptor {
+        id: device.id,
+        name: device.device.product_string().unwrap_or("Unknown").to_string(),
+        device_family: format!("{:?}", device.device_family),
+        serial: device.device.serial_number().map(|s| s.to_string()),
+        product_id: device.device.product_id(),
+        interface: device.device.interface_number(),
+    };
+
+    let operations = vec![
+        Operation {
+            method: "GET".to_string(),
+            path: format!("/api/devices/{}/status", id),
+            description: "Get device status and features".to_string(),
+        },
+        Operation {
+            method: "POST".to_string(),
+            path: format!("/api/devices/{}/feature", id),
+            description: "Set a device feature (toggle or slider)".to_string(),
+        },
+        Operation {
+            method: "POST".to_string(),
+            path: format!("/api/devices/{}/led", id),
+            description: "Set LED on/off".to_string(),
+        },
+    ];
+
+    Json(DeviceInfoResponse {
+        device: device_desc,
+        operations,
+    }).into_response()
+}
+
 /// GET /api/devices/:id/status — get features and state for a specific device
 #[derive(Serialize)]
 pub struct DeviceStatusResponse {
@@ -513,6 +573,11 @@ pub async fn get_api_info() -> impl IntoResponse {
                 method: "GET".to_string(),
                 path: "/api/devices".to_string(),
                 description: "List all connected devices".to_string(),
+            },
+            ApiEndpoint {
+                method: "GET".to_string(),
+                path: "/api/devices/:id".to_string(),
+                description: "Get device info and available operations".to_string(),
             },
             ApiEndpoint {
                 method: "GET".to_string(),
