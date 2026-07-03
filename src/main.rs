@@ -1,4 +1,4 @@
-use linuxblaster_control::{BlasterXG6, server};
+use linuxblaster_control::{DeviceRegistry, server};
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
@@ -13,7 +13,7 @@ use tray_icon::{
     MouseButton,
 };
 use wry::{WebViewBuilder, WebViewBuilderExtUnix};
-use tracing::Level;
+use tracing_subscriber::EnvFilter;
 
 fn main() {
     let start_minimized = std::env::args().any(|a| a == "--minimized");
@@ -54,11 +54,17 @@ fn main() {
     let event_loop = EventLoopBuilder::new().build();
 
     tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")))
         .init();
 
-    // Initialize device
-    let device = BlasterXG6::init().expect("Failed to initialize device");
+    // Discover all connected Creative Audio devices
+    let registry = match DeviceRegistry::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ERROR: {}. Exiting.", e);
+            std::process::exit(1);
+        }
+    };
 
     // Spawn web server in a separate thread
     std::thread::spawn(move || {
@@ -66,9 +72,9 @@ fn main() {
             .enable_all()
             .build()
             .unwrap();
-        
+
         rt.block_on(async {
-            server::start_server(device).await;
+            server::start_server(registry).await;
         });
     });
 
@@ -77,7 +83,7 @@ fn main() {
 
     // Create the Native Window
     let window = WindowBuilder::new()
-        .with_title("Sound Blaster G6X Controller")
+        .with_title("Sound Blaster Controller")
         .with_inner_size(LogicalSize::new(800.0, 640.0))
         .with_resizable(false)
         .with_window_icon(Some(load_window_icon()))
@@ -170,7 +176,7 @@ fn main() {
 fn get_icon_image_data() -> (Vec<u8>, u32, u32) {
     use linuxblaster_control::server::Assets;
 
-    let icon_file = Assets::get("icon.png").expect("Failed to load icon asset");
+    let icon_file = Assets::get("assets/icon.png").expect("Failed to load icon asset");
     let image = image::load_from_memory(&icon_file.data).expect("Failed to parse icon");
     let rgba = image.into_rgba8();
     let (width, height) = rgba.dimensions();
