@@ -1,12 +1,12 @@
 use axum::{
-    extract::{State, Json},
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{State, Json, Path},
+    http::{StatusCode, Uri},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::BlasterXG6;
+use crate::{BlasterXG6, DeviceRegistry, DeviceDescriptor};
 
 fn run_sys_cmd(cmd: &str, args: &[&str]) -> Option<std::process::Output> {
     if std::path::Path::new("/.flatpak-info").exists() {
@@ -19,9 +19,9 @@ fn run_sys_cmd(cmd: &str, args: &[&str]) -> Option<std::process::Output> {
 }
 
 
-// Shared state
+// Shared state — holds the registry of all connected devices
 pub struct AppState {
-    pub device: Mutex<BlasterXG6>,
+    pub registry: Mutex<DeviceRegistry>,
 }
 
 #[derive(Serialize)]
@@ -316,25 +316,57 @@ pub async fn set_mixer(Json(payload): Json<MixerSetRequest>) -> impl IntoRespons
     StatusCode::OK.into_response()
 }
 
+// =============================================================================
+// Device Registry API
+// =============================================================================
+
+/// GET /api/devices — list all connected devices
+pub async fn get_devices(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let registry = state.registry.lock().await;
+    let devices: Vec<DeviceDescriptor> = registry.descriptors();
+    Json(devices)
+}
+
+/// GET /api/devices/:id/status — get features and state for a specific device
 #[derive(Serialize)]
-pub struct StatusResponse {
+pub struct DeviceStatusResponse {
+    pub device: DeviceDescriptor,
     pub features: Vec<crate::Feature>,
     pub eq_bands: Option<[f32; 11]>,
 }
 
-pub async fn get_status(
+pub async fn get_device_status(
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let device = state.device.lock().await;
+    Path(id): Path<usize>,
+) -> Response {
+    let mut registry = state.registry.lock().await;
 
-    // Clone features to return
+    let device = match registry.device_mut(id) {
+        Some(d) => d,
+        None => {
+            return (StatusCode::NOT_FOUND, "Device not found").into_response();
+        }
+    };
+
+    let device_desc = DeviceDescriptor {
+        id: device.id,
+        name: device.device.product_string().unwrap_or("Unknown").to_string(),
+        device_family: format!("{:?}", device.device_family),
+        serial: device.device.serial_number().map(|s| s.to_string()),
+        product_id: device.device.product_id(),
+        interface: device.device.interface_number(),
+    };
+
     let features = device.features.clone();
     let eq_bands = device.get_ten_band_eq();
 
-    Json(StatusResponse {
+    Json(DeviceStatusResponse {
+        device: device_desc,
         features,
         eq_bands,
-    })
+    }).into_response()
 }
 
 #[derive(Deserialize)]
@@ -344,11 +376,20 @@ pub struct SetFeatureRequest {
     pub slider: Option<f32>,
 }
 
-pub async fn set_feature(
+/// POST /api/devices/:id/feature — set a feature on a specific device
+pub async fn set_device_feature(
     State(state): State<Arc<AppState>>,
+    Path(id): Path<usize>,
     Json(payload): Json<SetFeatureRequest>,
 ) -> impl IntoResponse {
-    let mut device = state.device.lock().await;
+    let mut registry = state.registry.lock().await;
+
+    let device = match registry.device_mut(id) {
+        Some(d) => d,
+        None => {
+            return (StatusCode::NOT_FOUND, "Device not found").into_response();
+        }
+    };
 
     if let Some(toggle_val) = payload.toggle {
         if let Err(e) = device.set_feature(&payload.name, Some(toggle_val)) {
@@ -371,6 +412,227 @@ pub async fn set_feature(
     StatusCode::OK.into_response()
 }
 
+// =============================================================================
+// Legacy single-device API (backward compatible with existing frontend)
+// Operates on first device in registry
+// =============================================================================
+
+#[derive(Serialize)]
+pub struct StatusResponse {
+    pub features: Vec<crate::Feature>,
+    pub eq_bands: Option<[f32; 11]>,
+    pub device_family: String,
+    pub device_name: String,
+}
+
+/// GET /api/status — legacy endpoint for first device
+pub async fn get_status(
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let mut registry = state.registry.lock().await;
+
+    // Operate on first device
+    let device = match registry.first_device() {
+        Some(d) => d,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No devices available").into_response();
+        }
+    };
+
+    let features = device.features.clone();
+    let eq_bands = device.get_ten_band_eq();
+    let device_family = format!("{:?}", device.device_family);
+    let device_name = device.device_family.name().to_string();
+
+    Json(StatusResponse {
+        features,
+        eq_bands,
+        device_family,
+        device_name,
+    }).into_response()
+}
+
+/// POST /api/feature — legacy endpoint for first device
+pub async fn set_feature(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SetFeatureRequest>,
+) -> impl IntoResponse {
+    let mut registry = state.registry.lock().await;
+
+    // Operate on first device
+    let device = match registry.device_mut(0) {
+        Some(d) => d,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No devices available").into_response();
+        }
+    };
+
+    if let Some(toggle_val) = payload.toggle {
+        if let Err(e) = device.set_feature(&payload.name, Some(toggle_val)) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set feature: {}", e)).into_response();
+        }
+    }
+
+    if let Some(slider_val) = payload.slider {
+        if let Err(e) = device.set_slider(&payload.name, slider_val) {
+             return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set slider: {}", e)).into_response();
+        }
+    }
+
+    let default_profile = device.profile_path.join("default.json");
+    if let Err(e) = device.save_profile(default_profile) {
+        tracing::error!("Failed to save default profile: {}", e);
+    }
+
+    // Success
+    StatusCode::OK.into_response()
+}
+
+#[derive(Serialize)]
+pub struct ApiInfo {
+    pub endpoints: Vec<ApiEndpoint>,
+}
+
+#[derive(Serialize)]
+pub struct ApiEndpoint {
+    pub method: String,
+    pub path: String,
+    pub description: String,
+}
+
+/// GET /api — list available API endpoints
+pub async fn get_api_info() -> impl IntoResponse {
+    Json(ApiInfo {
+        endpoints: vec![
+            ApiEndpoint {
+                method: "GET".to_string(),
+                path: "/api".to_string(),
+                description: "This API info".to_string(),
+            },
+            ApiEndpoint {
+                method: "GET".to_string(),
+                path: "/api/devices".to_string(),
+                description: "List all connected devices".to_string(),
+            },
+            ApiEndpoint {
+                method: "GET".to_string(),
+                path: "/api/devices/:id/status".to_string(),
+                description: "Get device status and features".to_string(),
+            },
+            ApiEndpoint {
+                method: "POST".to_string(),
+                path: "/api/devices/:id/feature".to_string(),
+                description: "Set a device feature (toggle or slider)".to_string(),
+            },
+            ApiEndpoint {
+                method: "POST".to_string(),
+                path: "/api/devices/:id/led".to_string(),
+                description: "Set LED on/off for a device".to_string(),
+            },
+            ApiEndpoint {
+                method: "GET".to_string(),
+                path: "/api/status".to_string(),
+                description: "Legacy: get first device status".to_string(),
+            },
+            ApiEndpoint {
+                method: "POST".to_string(),
+                path: "/api/feature".to_string(),
+                description: "Legacy: set feature on first device".to_string(),
+            },
+            ApiEndpoint {
+                method: "POST".to_string(),
+                path: "/api/led".to_string(),
+                description: "Legacy: set LED on first device".to_string(),
+            },
+            ApiEndpoint {
+                method: "GET".to_string(),
+                path: "/api/mixer/status".to_string(),
+                description: "Get mixer status".to_string(),
+            },
+            ApiEndpoint {
+                method: "POST".to_string(),
+                path: "/api/mixer/feature".to_string(),
+                description: "Set mixer feature".to_string(),
+            },
+            ApiEndpoint {
+                method: "POST".to_string(),
+                path: "/api/show_window".to_string(),
+                description: "Show the configuration window".to_string(),
+            },
+        ],
+    }).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct LedRequest {
+    pub on: bool,
+}
+
+/// POST /api/led — toggle LED on first device
+pub async fn set_led(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<LedRequest>,
+) -> impl IntoResponse {
+    let mut registry = state.registry.lock().await;
+
+    // Operate on first device
+    let device = match registry.device_mut(0) {
+        Some(d) => d,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "No devices available").into_response();
+        }
+    };
+
+    if let Err(e) = device.set_feature("LED", Some(payload.on)) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set LED: {}", e)).into_response();
+    }
+
+    let default_profile = device.profile_path.join("default.json");
+    if let Err(e) = device.save_profile(default_profile) {
+        tracing::error!("Failed to save default profile: {}", e);
+    }
+
+    StatusCode::OK.into_response()
+}
+
+/// POST /api/devices/:id/led — toggle LED on specific device
+pub async fn set_device_led(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<usize>,
+    Json(payload): Json<LedRequest>,
+) -> impl IntoResponse {
+    let mut registry = state.registry.lock().await;
+
+    let device = match registry.device_mut(id) {
+        Some(d) => d,
+        None => {
+            return (StatusCode::NOT_FOUND, format!("Device {} not found", id)).into_response();
+        }
+    };
+
+    if let Err(e) = device.set_feature("LED", Some(payload.on)) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set LED: {}", e)).into_response();
+    }
+
+    let default_profile = device.profile_path.join("default.json");
+    if let Err(e) = device.save_profile(default_profile) {
+        tracing::error!("Failed to save default profile: {}", e);
+    }
+
+    StatusCode::OK.into_response()
+}
+
 pub async fn not_found() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "Not Found")
+}
+
+/// API fallback: return 404 JSON for unknown /api/* routes
+pub async fn api_not_found(uri: Uri) -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": "Not Found",
+            "path": uri.path(),
+        })),
+    ).into_response()
 }
