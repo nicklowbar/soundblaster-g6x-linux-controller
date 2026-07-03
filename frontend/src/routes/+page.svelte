@@ -530,7 +530,7 @@
                 class="p-5 flex flex-col items-center border-b border-[#2a2a2a]"
             >
                 <img
-                    src="/logo.svg"
+                    src="/assets/logo.svg"
                     alt="Sound Blaster G6X"
                     class="w-32 h-auto mb-2 drop-shadow-lg"
                 />
@@ -580,23 +580,23 @@
                 class="border-t border-[#2a2a2a] p-4 flex flex-col items-center gap-5"
             >
                 <img
-                    src="/RizeCrime.svg"
+                    src="/assets/RizeCrime.svg"
                     alt="RizeCrime"
                     class="w-full max-w-[130px] h-auto object-contain opacity-100"
                 />
                 <img
-                    src="/yuuyu.svg"
+                    src="/assets/yuuyu.svg"
                     alt="Yuuyu"
                     class="w-full max-w-[100px] h-auto object-contain opacity-100"
                 />
                 <div class="flex items-center justify-center gap-5 w-full">
                     <img
-                        src="/dzz.png"
+                        src="/assets/dzz.png"
                         alt="DZZ"
                         class="h-8 w-auto object-contain opacity-100"
                     />
                     <img
-                        src="/1337.png"
+                        src="/assets/1337.png"
                         alt="1337"
                         class="h-8 w-auto object-contain opacity-100"
                     />
